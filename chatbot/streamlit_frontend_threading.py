@@ -125,12 +125,28 @@ if user_input:
     with st.chat_message('user'):
         st.text(user_input)
 
-    # CONFIG is built HERE, inside the if-block, using whatever thread_id is
-    # CURRENTLY active -- this is what makes every new message get appended
-    # to the RIGHT conversation, whether that's a brand-new thread or one
-    # that was just resumed from the sidebar.
-    CONFIG = {'configurable': {'thread_id': st.session_state['thread_id']}}
-
+# CONFIG is built HERE, inside the if-block, using whatever thread_id is
+# CURRENTLY active -- this is what makes every new message get appended
+# to the RIGHT conversation, whether that's a brand-new thread or one
+# that was just resumed from the sidebar.
+#
+# UPGRADED for LangSmith observability: 'configurable.thread_id' is what
+# LangGraph reads to route this call to the correct checkpointed thread --
+# that part already worked. 'metadata' and 'run_name' are NEW additions
+# that LangSmith reads to make each trace identifiable in the dashboard:
+#   - run_name  -> labels this trace "chat_turn" instead of a generic
+#                  default name, so a list of traces is actually skimmable.
+#   - metadata  -> attaches the thread_id as a SEARCHABLE tag on the trace,
+#                  so the dashboard can be filtered down to "show me every
+#                  trace from THIS specific conversation" -- something that
+#                  wasn't possible with configurable.thread_id alone, since
+#                  that field only controls routing, LangSmith doesn't
+#                  surface it as a filterable trace attribute on its own.
+    CONFIG = {
+    "configurable": {"thread_id": st.session_state["thread_id"]},
+    "metadata": {"thread_id": st.session_state["thread_id"]},
+    "run_name": "chat_turn",
+}
     # first add the message to message_history
     with st.chat_message("assistant"):
 
