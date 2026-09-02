@@ -1,6 +1,6 @@
 import streamlit as st
 from langgraph_tool_backend import chatbot, retrieve_all_threads
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import uuid
 
 # **************************************** utility functions *************************
@@ -32,8 +32,6 @@ if 'thread_id' not in st.session_state:
     st.session_state['thread_id'] = generate_thread_id()
 
 if 'chat_threads' not in st.session_state:
-    # seeded from the DATABASE, not an empty list -- same fix from the
-    # earlier persistence upgrade, so past conversations survive a refresh
     st.session_state['chat_threads'] = retrieve_all_threads()
 
 add_thread(st.session_state['thread_id'])
@@ -80,21 +78,54 @@ if user_input:
     }
 
     with st.chat_message("assistant"):
-        # ai_only_stream FILTERS the stream -- with tools bound in, the graph's
-        # message stream now includes internal tool-call requests and tool
-        # RESULT messages too, not just the final reply. Only AIMessage chunks
-        # (the model's own conversational text) get shown to the user; tool
-        # activity happens but stays invisible in the chat UI, same pattern
-        # as your earlier tool-using chatbot frontend.
+        # status_holder is a MUTABLE dict acting as a shared reference between
+        # this outer scope and the generator function below -- a plain local
+        # variable reassigned inside a generator wouldn't be visible out here,
+        # but mutating a dict's contents IS visible anywhere holding the same
+        # reference. This is what lets the code AFTER st.write_stream() finish
+        # (finalize the status box) even though it was created DURING the
+        # generator's execution.
+        status_holder = {"box": None}
+
         def ai_only_stream():
             for message_chunk, metadata in chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=CONFIG,
-                stream_mode="messages"
+                stream_mode="messages",
             ):
+                # ToolMessage = a tool's RESULT flowing back through the graph
+                # (produced by ToolNode after chat_node requests a tool call).
+                # Seeing one means "a tool just ran" -- this is the new piece.
+                if isinstance(message_chunk, ToolMessage):
+                    tool_name = getattr(message_chunk, "name", "tool")
+                    if status_holder["box"] is None:
+                        # first tool call this turn -- create the status box
+                        status_holder["box"] = st.status(
+                            f"🔧 Using `{tool_name}` …", expanded=True
+                        )
+                    else:
+                        # a LATER tool call in the same turn (the tools -> chat_node
+                        # loop can call tools more than once) -- update the SAME
+                        # box instead of creating a new one each time
+                        status_holder["box"].update(
+                            label=f"🔧 Using `{tool_name}` …",
+                            state="running",
+                            expanded=True,
+                        )
+
+                # Stream ONLY assistant tokens -- tool call/result machinery
+                # stays out of the actual chat bubble, same filter as before
                 if isinstance(message_chunk, AIMessage):
                     yield message_chunk.content
 
         ai_message = st.write_stream(ai_only_stream())
+
+        # AFTER streaming finishes: if a tool box was ever created this turn,
+        # mark it done and collapse it. Turns with no tool use never create
+        # status_holder["box"] in the first place, so nothing extra shows.
+        if status_holder["box"] is not None:
+            status_holder["box"].update(
+                label="✅ Tool finished", state="complete", expanded=False
+            )
 
     st.session_state['message_history'].append({'role': 'assistant', 'content': ai_message})
